@@ -4,16 +4,16 @@ This repository implements an end-to-end Automatic Speech Recognition (ASR) mode
 
 ## Features
 
-* 🔁 **SpecAugment** for robust data augmentation
-* 🧠 **Conformer blocks** with:
+* **SpecAugment** for robust data augmentation
+* **Conformer blocks** with:
 
   * Feed-Forward layers
   * Self-Attention with optional Rotary Positional Embedding (RoPE)
   * Convolutional modules (GLU + Depthwise Conv)
-* 🎙️ **ConvSubsampling** for input compression
-* 🧾 CTC-based decoder with **greedy** and **beam search** (KenLM optional)
-* 🧪 Weight initialization options: **Xavier** and **Kaiming**
-* 📤 Inference wrapper with token collapsing
+* **ConvSubsampling** for input compression
+* CTC-based decoder with **greedy** and **beam search** (KenLM optional)
+* Weight initialization options: **Xavier** and **Kaiming**
+* Inference wrapper with token collapsing
 
 ## Architecture Overview
 
@@ -23,7 +23,7 @@ Input Spectrogram → SpecAugment → ConvSubsampling
 → Linear Decoder (CTC) → Logits
 ```
 
-## 🚀 Usage
+## Usage
 
 ### Model Initialization
 
