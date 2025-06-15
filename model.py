@@ -343,8 +343,7 @@ class ConformerBlock(nn.Module):
         x = self.ffn1(x)
         x = self.mhsa(x)
         x = self.conv(x)
-        ffn_out = self.ffn2(x)
-        x = x + ffn_out
+        x = self.ffn2(x)
         y = self.norm(x)
         return y
 
