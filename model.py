@@ -1,6 +1,8 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.init as init
+import torch.nn.functional as F
 from pyctcdecode import build_ctcdecoder
 
 torch.autograd.set_detect_anomaly(True)
@@ -233,6 +235,88 @@ class MHSA(nn.Module):
         x = x + residual
 
         return x
+    
+
+class SelfAttention(nn.Module):
+    def __init__(self, d_model, num_heads, max_seq_len=2048, attn_pdrop=0.0, resid_pdrop=0.0, is_causal=False, enable_gqa=False, is_rope=True):
+        super(SelfAttention).__init__()
+        """
+        Rotary Positional Embedding Implementation
+            - self attention
+            - multihead
+            - grouped query attention
+
+        Note: This is inspired from Andrej's miniGPT
+        """
+        assert d_model%num_heads == 0
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.attn_pdrop = attn_pdrop
+        self.is_causal = is_causal
+        self.enable_gqa = enable_gqa
+        self.is_rope = is_rope
+
+        self.c_attn = nn.Linear(d_model, 3 * d_model)
+        self.c_proj = nn.Linear(d_model, d_model)
+        self.attn_dropout = nn.Dropout(attn_pdrop)
+        self.resid_dropout = nn.Dropout(resid_pdrop)
+
+        # for causal masking
+        self.register_buffer("bias", torch.tril(torch.ones(max_seq_len, max_seq_len)).view(1, 1, max_seq_len, max_seq_len))
+
+        # rotary cache
+        if self.is_rope:
+            inv_freq = 1.0 / (10000 ** (torch.arange(0, self.head_dim // 2, dtype=torch.float32) / (self.head_dim // 2)))
+            pos = torch.arange(0, max_seq_len, dtype=torch.float32)
+            freqs = torch.einsum('i,j->ij', pos, inv_freq)  # (T, head_dim//2)
+            self.register_buffer("cos_cached", torch.cos(freqs)[None, None, :, :], persistent=False)  # (1, 1, T, head_dim//2)
+            self.register_buffer("sin_cached", torch.sin(freqs)[None, None, :, :], persistent=False)
+
+    def apply_rotary_emb(self, q, k, T):
+        cos = self.cos_cached[:, :, :T, :]  # (1, 1, T, head_dim//2)
+        sin = self.sin_cached[:, :, :T, :]
+        q1, q2 = q[..., :self.head_dim // 2], q[..., self.head_dim // 2:]
+        k1, k2 = k[..., :self.head_dim // 2], k[..., self.head_dim // 2:]
+
+        q = torch.cat([q1 * cos - q2 * sin, q1 * sin + q2 * cos], dim=-1)
+        k = torch.cat([k1 * cos - k2 * sin, k1 * sin + k2 * cos], dim=-1)
+        return q, k
+
+    def forward(self, x):
+        """
+        x: (B, T, d_model)
+        """
+        B, T, d_model = x.size()
+        q, k ,v  = self.c_attn(x).split(self.d_model, dim=2)
+
+        q = q.view(B, T, self.num_heads, d_model // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
+        k = k.view(B, T, self.num_heads, d_model // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
+        v = v.view(B, T, self.num_heads, d_model // self.num_heads).transpose(1, 2) # (B, nh, T, hs)
+
+        if self.is_rope:
+            q, k = self.apply_rotary_emb(q, k, T)
+
+        # From: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+        if self.enable_gqa:
+            k = k.repeat_interleave(q.size(-3)//k.size(-3), -3)
+            v = v.repeat_interleave(q.size(-3)//v.size(-3), -3)
+
+        # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+        if self.is_causal:
+            att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+        att = F.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        y = y.transpose(1, 2).contiguous().view(B, T, d_model)
+
+        y = self.resid_dropout(self.c_proj(y))
+
+        # y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_pdrop, is_causal=self.is_causal, enable_gqa=self.enable_gqa)
+
+        return y
 
 
 class Conv(nn.Module):
@@ -308,11 +392,22 @@ class ConformerBlock(nn.Module):
             dropout=config["dropout"],
         )
 
-        self.mhsa = MHSA(
+        # self.mhsa = MHSA(
+        #     d_model=config["d_model"],
+        #     num_heads=config["n_heads"],
+        #     dropout=config["dropout"],
+        #     dropout_att=config["dropout_att"],
+        # )
+        
+        self.mhsa = SelfAttention(
             d_model=config["d_model"],
             num_heads=config["n_heads"],
-            dropout=config["dropout"],
-            dropout_att=config["dropout_att"],
+            max_seq_len=2048,
+            attn_pdrop=config["dropout_att"],
+            resid_pdrop=config["dropout"],
+            is_causal=True,
+            enable_gqa=False,
+            is_rope=True
         )
 
         self.conv = Conv(
